@@ -1,0 +1,28 @@
+{
+  "name": "calligraphy",
+  "productName": "Calligraphy",
+  "version": "1.0.0",
+  "description": "A typing surface that writes like a brush.",
+  "author": "nicholasaperry <45284435+nicholasaperry@users.noreply.github.com>",
+  "homepage": "https://github.com/nicholasaperry/calligraphy",
+  "license": "MIT",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.perrydev.calligraphy",
+    "productName": "Calligraphy",
+    "files": ["src/**/*", "package.json"],
+    "artifactName": "Calligraphy-${version}-${os}-${arch}.${ext}",
+    "mac": { "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }], "category": "public.app-category.productivity", "identity": null },
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
+    "nsis": { "oneClick": true, "perMachine": false },
+    "linux": { "target": ["AppImage", "deb"], "category": "Office", "maintainer": "nicholasaperry <45284435+nicholasaperry@users.noreply.github.com>" }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}
