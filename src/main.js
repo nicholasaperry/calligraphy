@@ -20,9 +20,9 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'index.html'));
 }
 
-// Shows the standard open dialog and returns the chosen text file's path and contents.
+// Shows the standard open dialog and returns the chosen markdown or text file's path and contents.
 async function openFile() {
-  const r = await dialog.showOpenDialog(win, { filters: [{ name: 'Text', extensions: ['txt'] }], properties: ['openFile'] });
+  const r = await dialog.showOpenDialog(win, { filters: [{ name: 'Markdown & Text', extensions: ['md', 'markdown', 'txt'] }, { name: 'All Files', extensions: ['*'] }], properties: ['openFile'] });
   if (r.canceled || !r.filePaths[0]) return null;
   return { path: r.filePaths[0], text: fs.readFileSync(r.filePaths[0], 'utf8') };
 }
@@ -31,7 +31,7 @@ async function openFile() {
 async function saveFile(_e, { path: p, text }) {
   let target = p;
   if (!target) {
-    const r = await dialog.showSaveDialog(win, { filters: [{ name: 'Text', extensions: ['txt'] }], defaultPath: 'notes.txt' });
+    const r = await dialog.showSaveDialog(win, { filters: [{ name: 'Markdown', extensions: ['md'] }, { name: 'Text', extensions: ['txt'] }], defaultPath: 'notes.md' });
     if (r.canceled || !r.filePath) return null;
     target = r.filePath;
   }

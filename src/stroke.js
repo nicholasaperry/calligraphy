@@ -91,7 +91,7 @@ const Stroke = (() => {
 
   // Builds (or fetches) the cached glyph image, scratch canvas and pen path for one character.
   function get(ch, font, size, dpr, adv) {
-    const key = ch + '|' + dpr;
+    const key = ch + '|' + font + '|' + dpr;
     let e = cache.get(key);
     if (e) return e;
     const padX = size * 0.4, oy = size * 1.15, cw = Math.ceil(adv + padX * 2), chh = Math.ceil(size * 1.9);

@@ -1,23 +1,27 @@
-// Brush module: text model, layout, and the per-glyph painted-in animation; knows nothing about DOM events or files.
+// Brush module: text model, styled markdown layout, and the per-glyph painted-in animation; knows nothing about DOM events or files.
 const Brush = (() => {
-  const SIZE = 38, LINE = 62, MARGIN = 140, WIPE = 0.55;
-  const FONT = `${SIZE}px "Segoe Script","Ink Free","Lucida Handwriting",cursive`;
+  const SIZE = 38, LINE = 62, MARGIN = 140, ASC = 0.72, KDUR = 0.28, VDUR = 0.24, BLUR = 3;
+  const PLAIN = Markdown.plain(SIZE);
   const ADV = new Map();
-  const state = { chars: [], caret: 0, scroll: 0, scrollTarget: 0, cx: MARGIN, cy: LINE, w: 0, h: 0, dpr: 1 };
+  const state = { chars: [], caret: 0, scroll: 0, scrollTarget: 0, cx: MARGIN, cy: LINE, w: 0, h: 0, dpr: 1, rows: [], car: new Float64Array(3), lines: Markdown.parse('', SIZE).lines, spans: [null] };
   const active = new Set();
-  let wetG = null, wetW = null, wetT = null, wetGC = null, wetWC = null, wetTC = null, wetCanvasW = 0, wetCanvasH = 0, wetDirty = true, wetUsed = false, ink = null, inkCtx = null, inkScroll = -1, measure = null, tx = null;
+  const anim = new Set();
+  let lineAnim = false;
+  let wetG = null, wetW = null, wetT = null, wetGC = null, wetWC = null, wetTC = null, wetCanvasW = 0, wetCanvasH = 0, wetDirty = true, wetUsed = false, ink = null, inkCtx = null, inkScroll = -1, measure = null, measureFont = '', tx = [MARGIN, MARGIN, SIZE];
 
   // Creates a text-model glyph with its own random hand-made jitter.
   function makeChar(c, born) {
-    return { c, born, x: 0, y: 0, rot: (Math.random() - 0.5) * 0.07, dy: (Math.random() - 0.5) * 3.5, sc: 0.96 + Math.random() * 0.09, adv: 0 };
+    return { c, born, x: 0, y: 0, rot: (Math.random() - 0.5) * 0.07, dy: (Math.random() - 0.5) * 3.5, sc: 0.96 + Math.random() * 0.09, adv: 0, st: PLAIN, pst: null, k: 1, vis: 1, sz: SIZE, fresh: true, hide: 0, span: 0, hidden: false, ln: 0 };
   }
 
-  // Returns the advance width of a character in the brush font, cached.
-  function advance(ch) {
-    if (ADV.has(ch)) return ADV.get(ch);
-    if (!measure) { measure = document.createElement('canvas').getContext('2d'); measure.font = FONT; }
+  // Returns the advance width of a character in a style's font, cached.
+  function advance(ch, st) {
+    const key = st.font + '|' + ch;
+    if (ADV.has(key)) return ADV.get(key);
+    if (!measure) measure = document.createElement('canvas').getContext('2d');
+    if (measureFont !== st.font) { measure.font = st.font; measureFont = st.font; }
     const w = ch === '\t' ? measure.measureText(' ').width * 4 : measure.measureText(ch).width;
-    ADV.set(ch, w);
+    ADV.set(key, w);
     return w;
   }
 
@@ -30,36 +34,84 @@ const Brush = (() => {
     wetCanvasW = canvas.width; wetCanvasH = canvas.height;
     [wetGC, wetWC, wetTC] = [0, 1, 2].map(() => { const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height; return c; });
     wetG = wetGC.getContext('2d'); wetW = wetWC.getContext('2d'); wetT = wetTC.getContext('2d'); wetDirty = true;
-    Stroke.clear(); Stroke.ink = Paper.css(Paper.current().ink); 
+    Stroke.clear(); Stroke.ink = Paper.css(Paper.current().ink);
     relayout(false);
   }
 
-  // Positions every glyph with word-wrapping and updates the caret target.
-  function relayout(follow = true) {
-    const maxX = state.w - MARGIN;
-    let x = MARGIN, y = MARGIN, lastSpace = -1;
-    const cs = state.chars;
+  // Eases 0..1 progress with a smoothstep curve.
+  function ease(t) { return t * t * (3 - 2 * t); }
+
+  // Re-parses the markdown and copies each character's style, marker flag and span id onto the glyph model.
+  function restyle() {
+    const cs = state.chars, P = Markdown.parse(text(), SIZE);
     for (let i = 0; i < cs.length; i++) {
-      const c = cs[i];
-      c.adv = c.c === '\n' ? 0 : advance(c.c);
-      if (c.c === '\n') { c.x = x; c.y = y; x = MARGIN; y += LINE; lastSpace = -1; continue; }
-      if (x + c.adv > maxX && x > MARGIN && c.c !== " ") {
-        y += LINE; x = MARGIN;
-        if (lastSpace >= 0 && c.c !== ' ') {
-          let j = lastSpace + 1;
-          for (; j < i; j++) { cs[j].x = x; cs[j].y = y; x += cs[j].adv; }
-        }
-        lastSpace = -1;
+      const c = cs[i], st = P.styles[i];
+      if (c.st !== st) {
+        if (!c.fresh && c.vis > 0.01 && c.c !== '\n' && !active.has(c)) { c.pst = c.st; c.k = 0; anim.add(c); } else { c.pst = null; c.k = 1; }
+        c.st = st; c.dur = 0; wetDirty = true;
       }
-      c.x = x; c.y = y; x += c.adv;
-      if (c.c === ' ') lastSpace = i;
+      c.hide = P.hide[i]; c.span = P.span[i];
     }
-    const k = Math.min(state.caret, cs.length);
-    if (k < cs.length) { tx = [cs[k].x, cs[k].y]; }
-    else if (k === 0) tx = [MARGIN, MARGIN];
-    else if (cs[k - 1].c === '\n') tx = [MARGIN, cs[k - 1].y + LINE];
-    else tx = [cs[k - 1].x + cs[k - 1].adv, cs[k - 1].y];
-    state.docEnd = Math.max(y, tx[1]);
+    const old = state.lines;
+    P.lines.forEach((L, i) => { if (old[i]) L.rv = old[i].rv; });
+    state.lines = P.lines; state.spans = P.spans;
+  }
+
+  // Lays out the styled document: marker reveal, word-wrap into rows, per-row heights, glyph positions and the caret target.
+  function relayout(follow = true) {
+    const cs = state.chars, n = cs.length, lines = state.lines, spans = state.spans, k = Math.min(state.caret, n), maxX = state.w - MARGIN;
+    for (const L of lines) L.rev = k >= L.start && k <= L.end;
+    for (const c of cs) {
+      const sp = c.span ? spans[c.span] : null;
+      c.hidden = !!c.hide && !(sp && k >= sp[0] && k <= sp[1]);
+      if (c.fresh) { c.vis = c.hidden ? 0 : 1; c.fresh = false; } else if (c.vis !== (c.hidden ? 0 : 1)) anim.add(c);
+      const e = c.k < 1 && c.pst ? ease(c.k) : 1;
+      c.sz = e < 1 ? c.pst.size + (c.st.size - c.pst.size) * e : c.st.size;
+      c.adv = c.c === '\n' ? 0 : (e < 1 ? advance(c.c, c.pst) + (advance(c.c, c.st) - advance(c.c, c.pst)) * e : advance(c.c, c.st)) * ease(c.vis);
+    }
+    lineAnim = lines.some(L => L.rv !== (L.rev ? 0 : 1));
+    // Where a row starts: its first row hangs left by the visible prefix so content stays put.
+    const startX = (L, first) => {
+      let x = MARGIN + L.indent;
+      if (first) for (let j = L.start; j < L.prefixEnd; j++) x -= cs[j].adv;
+      return x;
+    };
+    const rows = [];
+    let rs = 0, ln = 0, first = true, x = startX(lines[0], true), lastSp = -1;
+    for (let i = 0; i < n; i++) {
+      const c = cs[i]; c.ln = ln;
+      if (c.c === '\n') {
+        rows.push({ start: rs, end: i + 1, line: lines[ln], first });
+        rs = i + 1; ln++; first = true; x = startX(lines[ln], true); lastSp = -1; continue;
+      }
+      if (x + c.adv > maxX && i > rs && c.c !== ' ') {
+        const b = lastSp >= rs ? lastSp + 1 : i;
+        rows.push({ start: rs, end: b, line: lines[ln], first });
+        rs = b; first = false; x = startX(lines[ln], false);
+        for (let j = rs; j < i; j++) x += cs[j].adv;
+        lastSp = -1;
+      }
+      x += c.adv;
+      if (c.c === ' ') lastSp = i;
+    }
+    rows.push({ start: rs, end: n, line: lines[ln], first });
+    const car = new Float64Array((n + 1) * 3);
+    let top = MARGIN - ASC * LINE;
+    for (let r = 0; r < rows.length; r++) {
+      const R = rows[r];
+      let s = Math.max(SIZE, R.line.size);
+      for (let j = R.start; j < R.end; j++) if (cs[j].sz > s) s = cs[j].sz;
+      R.s = s; R.h = LINE * s / SIZE;
+      if (R.first && R.line.kind === 'h' && r > 0) top += R.h * 0.3;
+      R.top = top; R.y = top + ASC * R.h; top += R.h;
+      let px = startX(R.line, R.first);
+      for (let j = R.start; j < R.end; j++) { const c = cs[j]; c.x = px; c.y = R.y; px += c.adv; car[3 * j] = c.x; car[3 * j + 1] = R.y; car[3 * j + 2] = R.s; }
+      R.x1 = px;
+      if (r === rows.length - 1) { car[3 * n] = px; car[3 * n + 1] = R.y; car[3 * n + 2] = R.s; }
+    }
+    state.rows = rows; state.car = car;
+    tx = [car[3 * k], car[3 * k + 1], car[3 * k + 2]];
+    state.docEnd = rows[rows.length - 1].y;
     let t = state.scrollTarget;
     if (follow) {
       if (tx[1] - LINE * 1.6 < t) t = tx[1] - LINE * 1.6;
@@ -73,22 +125,19 @@ const Brush = (() => {
   function insert(text, now, delayFn) {
     const made = [];
     for (let i = 0; i < text.length; i++) {
-      const ch = text[i] === '\r' ? null : text[i];
-      if (ch === null) continue;
-      const c = makeChar(ch, now + (delayFn ? delayFn(i) : 0));
-      made.push(c);
+      if (text[i] === '\r') continue;
+      made.push(makeChar(text[i], now + (delayFn ? delayFn(i) : 0)));
     }
-    warm(text);
     state.chars.splice(state.caret, 0, ...made);
     state.caret += made.length;
-    relayout();
-    for (const c of made) if (c.c.trim()) active.add(c);
+    restyle(); relayout(); warmChars(made);
+    for (const c of made) if (c.c.trim() && !c.hidden) active.add(c);
     return made;
   }
 
   // Replaces the whole document, then paints every glyph in as a parallel diagonal wave.
   function load(text, now) {
-    state.chars = []; state.caret = 0; active.clear();
+    state.chars = []; state.caret = 0; active.clear(); anim.clear();
     const clean = text.replace(/\r/g, '');
     insert(clean, now, null);
     const maxX = state.w - MARGIN, rows = new Set();
@@ -104,23 +153,30 @@ const Brush = (() => {
   function remove(dir) {
     const i = dir < 0 ? state.caret - 1 : state.caret;
     if (i < 0 || i >= state.chars.length) return false;
-    active.delete(state.chars[i]); wetDirty = true;
+    active.delete(state.chars[i]); anim.delete(state.chars[i]); wetDirty = true;
     state.chars.splice(i, 1);
     if (dir < 0) state.caret--;
-    relayout();
+    restyle(); relayout();
     return true;
   }
+
+  // Returns the row index holding the caret.
+  function caretRow() {
+    const i = state.rows.findIndex(R => Math.abs(R.y - tx[1]) < 0.5);
+    return i < 0 ? 0 : i;
+  }
+
+  // Returns the last caret index that belongs to a row (the final row also owns the end of the document).
+  function rowEnd(r) { return r === state.rows.length - 1 ? state.chars.length : state.rows[r].end - 1; }
 
   // Moves the caret by a column delta or a row delta, clamped to the document.
   function move(dCol, dRow) {
     const cs = state.chars;
     if (dRow) {
-      const cur = tx; let best = state.caret, bestD = Infinity;
-      const targetY = cur[1] + dRow * LINE;
-      for (let i = 0; i <= cs.length; i++) {
-        const p = i < cs.length ? [cs[i].x, cs[i].y] : (i && cs[i - 1].c !== '\n' ? [cs[i - 1].x + cs[i - 1].adv, cs[i - 1].y] : [MARGIN, i ? cs[i - 1].y + LINE : MARGIN]);
-        if (Math.abs(p[1] - targetY) > 1) continue;
-        const d = Math.abs(p[0] - cur[0]);
+      const r = Math.max(0, Math.min(state.rows.length - 1, caretRow() + dRow)), R = state.rows[r];
+      let best = state.caret, bestD = Infinity;
+      for (let i = R.start; i <= rowEnd(r); i++) {
+        const d = Math.abs(state.car[3 * i] - tx[0]);
         if (d < bestD) { bestD = d; best = i; }
       }
       state.caret = best;
@@ -128,18 +184,21 @@ const Brush = (() => {
     relayout();
   }
 
-  // Builds the pen path for every distinct character in a string so no frame pays that cost mid-animation.
+  // Builds the pen path for every distinct glyph in a plain string so no frame pays that cost mid-animation.
   function warm(str) {
-    for (const ch of new Set(str)) if (ch.trim()) Stroke.get(ch, FONT, SIZE, state.dpr, advance(ch));
+    for (const ch of new Set(str)) if (ch.trim()) Stroke.get(ch, PLAIN.font, PLAIN.size, state.dpr, advance(ch, PLAIN));
   }
 
-  // Returns the document-space position of the caret when placed before character index i.
-  function caretPos(i) {
-    const cs = state.chars;
-    if (i < cs.length) return [cs[i].x, cs[i].y];
-    if (i === 0) return [MARGIN, MARGIN];
-    if (cs[i - 1].c === '\n') return [MARGIN, cs[i - 1].y + LINE];
-    return [cs[i - 1].x + cs[i - 1].adv, cs[i - 1].y];
+  // Builds the pen path for every distinct visible (glyph, style) pair in a list of characters.
+  function warmChars(list) {
+    const seen = new Set();
+    for (const c of list) {
+      if (!c.c.trim() || c.hidden) continue;
+      const key = c.st.font + c.c;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      Stroke.get(c.c, c.st.font, c.st.size, state.dpr, advance(c.c, c.st));
+    }
   }
 
   // Scrolls the page by a pixel delta without moving the caret, clamped to the document.
@@ -150,10 +209,10 @@ const Brush = (() => {
 
   // Finds the caret index nearest a window-space click point.
   function indexAt(px, py) {
-    const ty = py + state.scrollTarget + SIZE * 0.35;
-    let best = state.chars.length, bd = Infinity;
-    for (let i = 0; i <= state.chars.length; i++) {
-      const p = caretPos(i), d = Math.abs(p[1] - ty) * 4 + Math.abs(p[0] - px);
+    const ty = py + state.scrollTarget + SIZE * 0.35, car = state.car, n = state.chars.length;
+    let best = n, bd = Infinity;
+    for (let i = 0; i <= n; i++) {
+      const d = Math.abs(car[3 * i + 1] - ty) * 4 + Math.abs(car[3 * i] - px);
       if (d < bd) { bd = d; best = i; }
     }
     return best;
@@ -178,36 +237,53 @@ const Brush = (() => {
   function removeWord(dir) {
     const t = wordTarget(dir), a = Math.min(t, state.caret), n = Math.abs(t - state.caret);
     if (!n) return false;
-    for (const c of state.chars.slice(a, a + n)) active.delete(c);
+    for (const c of state.chars.slice(a, a + n)) { active.delete(c); anim.delete(c); }
     state.chars.splice(a, n); state.caret = a;
-    relayout();
+    restyle(); relayout();
     return true;
   }
 
-  // Jumps the caret to the start or end of its line (dir<0 start, dir>0 end) or of the whole document when whole is set.
+  // Jumps the caret to the start or end of its row (dir<0 start, dir>0 end) or of the whole document when whole is set.
   function jump(dir, whole) {
     if (whole) state.caret = dir < 0 ? 0 : state.chars.length;
-    else {
-      const y = caretPos(state.caret)[1]; let r = state.caret;
-      for (let i = 0; i <= state.chars.length; i++) if (Math.abs(caretPos(i)[1] - y) < 1) { if (dir < 0) { r = i; break; } r = i; }
-      state.caret = r;
-    }
+    else { const r = caretRow(); state.caret = dir < 0 ? state.rows[r].start : rowEnd(r); }
     relayout();
   }
 
   // Returns the whole document as a plain string.
   function text() { return state.chars.map(c => c.c).join(''); }
 
-  // Draws one fully inked glyph into a context at its jittered position.
-  function drawGlyph(g, c, inkRgb) {
+  // Draws a glyph's underline or strike-through (skipped for plain text) in its jittered local space.
+  function drawMark(g, c, st) {
+    if (!st.link && !st.strike) return;
+    g.lineWidth = 1.4; g.lineCap = 'round';
+    g.beginPath();
+    if (st.link) { g.moveTo(0, 6); g.lineTo(c.adv, 6); }
+    if (st.strike) { g.moveTo(0, -st.size * 0.3); g.lineTo(c.adv, -st.size * 0.3); }
+    g.stroke();
+  }
+
+  // Draws one glyph in one style at its jittered position, optionally faded and soft-focused.
+  function paintGlyph(g, c, st, rgb, alpha, blur) {
     g.save();
     g.translate(c.x, c.y + c.dy);
     g.rotate(c.rot);
     g.scale(c.sc, c.sc);
-    g.font = FONT;
-    g.fillStyle = Paper.css(inkRgb); g.strokeStyle = g.fillStyle; g.lineWidth = 1.1; g.lineJoin = 'round';
-    g.fillText(c.c, 0, 0); g.strokeText(c.c, 0, 0);
+    g.globalAlpha = st.alpha * alpha;
+    if (blur > 0.2) g.filter = `blur(${(blur * state.dpr).toFixed(2)}px)`;
+    g.font = st.font;
+    g.fillStyle = Paper.css(rgb); g.strokeStyle = g.fillStyle; g.lineWidth = 1.1; g.lineJoin = 'round';
+    if (c.c.trim()) { g.fillText(c.c, 0, 0); g.strokeText(c.c, 0, 0); }
+    drawMark(g, c, st);
     g.restore();
+  }
+
+  // Draws one settled glyph, cross-blurring from its previous style while a restyle or marker fade is in flight.
+  function drawGlyph(g, c, rgb) {
+    const k = c.pst ? ease(c.k) : 1, v = ease(c.vis);
+    if (k >= 1 && v >= 1) { paintGlyph(g, c, c.st, rgb, 1, 0); return; }
+    if (k < 1) paintGlyph(g, c, c.pst, rgb, (1 - k) * v, k * BLUR);
+    paintGlyph(g, c, c.st, rgb, k * v, ((1 - k) + (1 - v)) * BLUR);
   }
 
   // Draws a glyph's full image into the wet-ink layer at its jittered position (it stays hidden until swept by the pen).
@@ -217,6 +293,7 @@ const Brush = (() => {
     g.translate(c.x, c.y + c.dy);
     g.rotate(c.rot);
     g.scale(c.sc, c.sc);
+    g.globalAlpha = c.st.alpha;
     g.drawImage(e.G, -e.padX, -e.oy, e.cw, e.ch);
     g.restore();
   }
@@ -237,8 +314,9 @@ const Brush = (() => {
     const tips = [];
     state.pens = 0;
     for (const c of settle.all) {
+      if (c.hidden) { settle.done.push(c); continue; }
       if (now < c.born) continue;
-      const e = Stroke.get(c.c, FONT, SIZE, state.dpr, c.adv);
+      const e = Stroke.get(c.c, c.st.font, c.st.size, state.dpr, c.adv);
       if (!c.an) { c.an = { k: 0, x: 0, y: 0, d: 0 }; stampWet(c, e); if (!c.dur) c.dur = Math.max(130, Math.min(560, (e.L || 20) * 3.4)); }
       const q = Math.min(1, (now - c.born) / c.dur), t = q < 0.5 ? 2 * q * q : 1 - 2 * (1 - q) * (1 - q);
       const co = Math.cos(c.rot) * c.sc, si = Math.sin(c.rot) * c.sc, ox = c.x, oy = c.y + c.dy;
@@ -267,16 +345,69 @@ const Brush = (() => {
     }
   }
 
-  // Redraws every settled, on-screen glyph into the ink cache at the current scroll.
+  // Draws one list bullet, hollow ring, checkbox or ticked box in the gutter beside a line's first row.
+  function drawBullet(g, L, R, rgb) {
+    const x = MARGIN + L.indent - 22, y = R.y - R.s * 0.3, j = ((L.start * 37) % 7 - 3) * 0.2;
+    g.save();
+    g.translate(x, y); g.rotate(j * 0.1);
+    g.strokeStyle = g.fillStyle = Paper.css(rgb, 0.9); g.lineWidth = 1.7; g.lineCap = 'round'; g.lineJoin = 'round';
+    if (L.bullet === 'dot') {
+      g.beginPath(); g.arc(0, 0, L.level ? 3.4 : 3.9, 0, 6.283);
+      if (L.level) g.stroke(); else g.fill();
+    } else {
+      g.beginPath(); g.roundRect(-9, -10, 18, 18, 4); g.stroke();
+      if (L.bullet === 'tick') { g.beginPath(); g.moveTo(-5, -1); g.lineTo(-1, 4); g.lineTo(7, -9); g.lineWidth = 2.4; g.stroke(); }
+    }
+    g.restore();
+  }
+
+  // Draws the block decorations behind settled ink: code washes, quote bars, bullets and horizontal rules.
+  function decorate(g, rgb) {
+    const top = state.scroll - LINE * 2, bot = state.scroll + state.h + LINE * 2, cs = state.chars, maxX = state.w - MARGIN;
+    for (const R of state.rows) {
+      if (R.y < top || R.y > bot) continue;
+      const L = R.line;
+      if (L.kind === 'fence' || L.kind === 'code') {
+        g.fillStyle = Paper.css(rgb, 0.06); g.fillRect(MARGIN - 18, R.top, maxX - MARGIN + 36, R.h);
+        continue;
+      }
+      let x0 = -1, x1 = 0;
+      const flush = () => {
+        if (x0 < 0) return;
+        g.fillStyle = Paper.css(rgb, 0.08); g.beginPath(); g.roundRect(x0 - 3, R.y - R.s * 0.82, x1 - x0 + 6, R.s * 1.12, 5); g.fill(); x0 = -1;
+      };
+      for (let j = R.start; j < R.end; j++) {
+        const c = cs[j];
+        if (c.st.code && c.vis > 0.01) { if (x0 < 0) x0 = c.x; x1 = c.x + c.adv; } else if (x0 >= 0 && c.adv) flush();
+      }
+      flush();
+      const rv = ease(L.rv);
+      if (rv < 0.02) continue;
+      g.globalAlpha = rv;
+      if (L.kind === 'quote') { g.fillStyle = Paper.css(rgb, 0.35); g.fillRect(MARGIN + 6, R.top + 4, 3, R.h - 8); }
+      if (L.bullet && L.bullet !== 'num' && R.first) drawBullet(g, L, R, rgb);
+      if (L.kind === 'hr') {
+        g.strokeStyle = Paper.css(rgb, 0.55); g.lineWidth = 2.2; g.lineCap = 'round';
+        g.beginPath();
+        const y = R.y - R.s * 0.3;
+        for (let x = MARGIN; x <= maxX; x += 4) { const yy = y + Math.sin(x / 19 + L.start) * 1.6; x === MARGIN ? g.moveTo(x, yy) : g.lineTo(x, yy); }
+        g.stroke();
+      }
+      g.globalAlpha = 1;
+    }
+  }
+
+  // Redraws block decorations and every settled, on-screen glyph into the ink cache at the current scroll.
   function redrawInk() {
     const g = inkCtx, rgb = Paper.current().ink;
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.clearRect(0, 0, ink.width, ink.height);
     g.setTransform(state.dpr, 0, 0, state.dpr, 0, -state.scroll * state.dpr);
-    const top = state.scroll - LINE, bot = state.scroll + state.h + LINE;
+    decorate(g, rgb);
+    const top = state.scroll - LINE * 2, bot = state.scroll + state.h + LINE * 2;
     for (const c of state.chars) {
-      if (c.y < top || c.y > bot || !c.c.trim() || active.has(c)) continue;
-      drawGlyph(g, c, rgb);
+      if (c.y < top || c.y > bot || c.vis < 0.01 || c.c === '\n' || active.has(c)) continue;
+      if (c.c.trim() || c.st.link || c.st.strike) drawGlyph(g, c, rgb);
     }
     inkScroll = state.scroll; wetDirty = true;
   }
@@ -327,8 +458,25 @@ const Brush = (() => {
     ctx.restore();
   }
 
+  // Advances restyle cross-fades, marker collapses and decoration fades, re-laying out while anything is in flight.
+  function step(dt) {
+    if (!anim.size && !lineAnim) return;
+    for (const c of anim) {
+      if (c.k < 1) c.k = Math.min(1, c.k + dt / KDUR);
+      const tv = c.hidden ? 0 : 1;
+      if (c.vis !== tv) c.vis = c.vis < tv ? Math.min(tv, c.vis + dt / VDUR) : Math.max(tv, c.vis - dt / VDUR);
+      if (c.k >= 1 && c.vis === tv) { c.pst = null; anim.delete(c); }
+    }
+    for (const L of state.lines) {
+      const tv = L.rev ? 0 : 1;
+      if (L.rv !== tv) L.rv = L.rv < tv ? Math.min(tv, L.rv + dt / VDUR) : Math.max(tv, L.rv - dt / VDUR);
+    }
+    relayout(false);
+  }
+
   // Advances smoothing and renders one frame: paper, settled ink, animating glyphs, then the brush-tip caret.
   function frame(ctx, paperCanvas, now, dt) {
+    step(dt);
     state.scroll += (state.scrollTarget - state.scroll) * (1 - Math.exp(-dt * 10));
     if (Math.abs(state.scrollTarget - state.scroll) < 0.05) state.scroll = state.scrollTarget;
     if (!state.cur) state.cur = { x: tx[0], y: tx[1], vx: 0, vy: 0 };
@@ -342,17 +490,17 @@ const Brush = (() => {
     if (active.size) {
       const settle = { all: [...active], done: [] };
       paintWet(ctx, now, rgb, settle);
-      for (const c of settle.done) { active.delete(c); c.an = null; drawGlyph(inkCtx, c, rgb); }
+      for (const c of settle.done) { active.delete(c); c.an = null; if (!c.hidden) drawGlyph(inkCtx, c, rgb); }
       inkCtx.setTransform(state.dpr, 0, 0, state.dpr, 0, -state.scroll * state.dpr);
       wetUsed = true;
     } else if (wetUsed) { wetDirty = true; paintWet(ctx, now, rgb, { all: [], done: [] }); wetUsed = false; state.pens = 0; }
     const c = state.cur, sp = Math.hypot(c.vx, c.vy), ang = sp > 20 ? Math.atan2(c.vy, c.vx) : 0.5;
     const stretch = 1 + Math.min(sp / 900, 2.2);
     ctx.save();
-    ctx.translate(c.x + 3, c.y - SIZE * 0.35);
+    ctx.translate(c.x + 3, c.y - tx[2] * 0.35);
     ctx.fillStyle = Paper.css(rgb, 0.5);
     if (sp > 20) { ctx.rotate(ang); ctx.beginPath(); ctx.ellipse(0, 0, 3 * stretch + 1, 3, 0, 0, 6.283); }
-    else { ctx.rotate(0.5); ctx.beginPath(); ctx.ellipse(0, 0, 2.4, 8.5, 0, 0, 6.283); }
+    else { ctx.rotate(0.5); ctx.beginPath(); ctx.ellipse(0, 0, 2.4, tx[2] * 0.22, 0, 0, 6.283); }
     ctx.fill();
     ctx.restore();
     if (state.ptr) { springPointer(dt); drawPointer(ctx, rgb); }
