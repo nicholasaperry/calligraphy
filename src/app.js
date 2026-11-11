@@ -53,24 +53,29 @@
     if (e.ctrlKey || e.metaKey) {
       const k = e.key.toLowerCase();
       if (k === 's') { e.preventDefault(); saveFile(); } else if (k === 'o') { e.preventDefault(); openFile(); }
-      else if (e.key === 'ArrowLeft') { e.preventDefault(); Brush.moveWord(-1); }
-      else if (e.key === 'ArrowRight') { e.preventDefault(); Brush.moveWord(1); }
+      else if (e.code === 'KeyA') { e.preventDefault(); if (e.altKey) Brush.selectSection(); else Brush.selectAll(); }
+      else if (k === 'c' || k === 'x') {
+        const t = Brush.selectedText();
+        if (t) { e.preventDefault(); try { navigator.clipboard.writeText(t); } catch (err) {} if (k === 'x') { Brush.deleteSel(); Sound.key('back'); } }
+      }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); Brush.moveWord(-1, e.shiftKey); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); Brush.moveWord(1, e.shiftKey); }
       else if (e.key === 'Backspace') { e.preventDefault(); if (Brush.removeWord(-1)) Sound.key('back'); }
       else if (e.key === 'Delete') { e.preventDefault(); if (Brush.removeWord(1)) Sound.key('back'); }
-      else if (e.key === 'Home') { e.preventDefault(); Brush.jump(-1, true); }
-      else if (e.key === 'End') { e.preventDefault(); Brush.jump(1, true); }
+      else if (e.key === 'Home') { e.preventDefault(); Brush.jump(-1, true, e.shiftKey); }
+      else if (e.key === 'End') { e.preventDefault(); Brush.jump(1, true, e.shiftKey); }
       return;
     }
     if (e.altKey) return;
     switch (e.key) {
       case 'Backspace': e.preventDefault(); if (Brush.remove(-1)) Sound.key('back'); return;
       case 'Delete': e.preventDefault(); if (Brush.remove(1)) Sound.key('back'); return;
-      case 'ArrowLeft': Brush.move(-1, 0); return;
-      case 'ArrowRight': Brush.move(1, 0); return;
-      case 'ArrowUp': Brush.move(0, -1); return;
-      case 'ArrowDown': Brush.move(0, 1); return;
-      case 'Home': e.preventDefault(); Brush.jump(-1, false); return;
-      case 'End': e.preventDefault(); Brush.jump(1, false); return;
+      case 'ArrowLeft': Brush.move(-1, 0, e.shiftKey); return;
+      case 'ArrowRight': Brush.move(1, 0, e.shiftKey); return;
+      case 'ArrowUp': Brush.move(0, -1, e.shiftKey); return;
+      case 'ArrowDown': Brush.move(0, 1, e.shiftKey); return;
+      case 'Home': e.preventDefault(); Brush.jump(-1, false, e.shiftKey); return;
+      case 'End': e.preventDefault(); Brush.jump(1, false, e.shiftKey); return;
       case 'PageUp': e.preventDefault(); Brush.scrollBy(-window.innerHeight * 0.8); return;
       case 'PageDown': e.preventDefault(); Brush.scrollBy(window.innerHeight * 0.8); return;
       case 'Enter': e.preventDefault(); type('\n'); return;
@@ -109,6 +114,7 @@
     window.addEventListener('mousemove', e => Brush.pointer(e.clientX, e.clientY));
     document.documentElement.addEventListener('mouseleave', () => Brush.pointerOff());
     canvas.addEventListener('mousedown', e => Brush.placeCaret(e.clientX, e.clientY));
+    window.addEventListener('mousemove', e => { if (e.buttons & 1) Brush.dragTo(e.clientX, e.clientY); });
     swatch.addEventListener('click', cyclePaper);
     requestAnimationFrame(loop);
     setTimeout(() => Brush.warm('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;!?-()'), 300);

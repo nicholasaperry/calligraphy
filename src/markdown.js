@@ -67,7 +67,7 @@ const Markdown = (() => {
     let pos = 0, fence = false;
     for (;;) {
       const nl = text.indexOf('\n', pos), end = nl < 0 ? n : nl, s = text.slice(pos, end);
-      const ln = { start: pos, end, kind: 'p', indent: 0, prefixEnd: pos, bullet: null, level: 0, size: base, rev: false, rv: 1 };
+      const ln = { start: pos, end, kind: 'p', indent: 0, prefixEnd: pos, bullet: null, level: 0, hl: 0, size: base, rev: false, rv: 1 };
       let lb = 0, cs = pos, m;
       // Hides [x, y) as line-prefix markers that reveal while the caret is anywhere on the line.
       const hidePrefix = (x, y) => { const id = spans.push([pos, end]) - 1; for (let p = x; p < y; p++) { hide[p] = 1; span[p] = id; } };
@@ -75,7 +75,7 @@ const Markdown = (() => {
       else if (fence) { ln.kind = 'code'; lb = M | C; }
       else if ((m = /^ {0,3}(#{1,6})[ \t]+/.exec(s))) {
         const lv = Math.min(m[1].length, 4);
-        ln.kind = 'h'; ln.size = Math.round(base * SCALE[lv]); lb = (lv << 8) | B;
+        ln.kind = 'h'; ln.hl = m[1].length; ln.size = Math.round(base * SCALE[lv]); lb = (lv << 8) | B;
         cs = ln.prefixEnd = pos + m[0].length; hidePrefix(pos, cs);
       } else if (/^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(s)) { ln.kind = 'hr'; hidePrefix(pos, end); cs = end; }
       else if ((m = /^ {0,3}>[ \t]?/.exec(s))) {

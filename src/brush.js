@@ -3,7 +3,7 @@ const Brush = (() => {
   const SIZE = 38, LINE = 62, MARGIN = 140, ASC = 0.72, KDUR = 0.28, VDUR = 0.24, BLUR = 3;
   const PLAIN = Markdown.plain(SIZE);
   const ADV = new Map();
-  const state = { chars: [], caret: 0, scroll: 0, scrollTarget: 0, cx: MARGIN, cy: LINE, w: 0, h: 0, dpr: 1, rows: [], car: new Float64Array(3), lines: Markdown.parse('', SIZE).lines, spans: [null] };
+  const state = { chars: [], caret: 0, anchor: null, scroll: 0, scrollTarget: 0, cx: MARGIN, cy: LINE, w: 0, h: 0, dpr: 1, rows: [], car: new Float64Array(3), lines: Markdown.parse('', SIZE).lines, spans: [null] };
   const active = new Set();
   const anim = new Set();
   let lineAnim = false;
@@ -123,6 +123,7 @@ const Brush = (() => {
 
   // Inserts text at the caret; each glyph gets its own birth time (delayFn staggers them).
   function insert(text, now, delayFn) {
+    deleteSel();
     const made = [];
     for (let i = 0; i < text.length; i++) {
       if (text[i] === '\r') continue;
@@ -137,7 +138,7 @@ const Brush = (() => {
 
   // Replaces the whole document, then paints every glyph in as a parallel diagonal wave.
   function load(text, now) {
-    state.chars = []; state.caret = 0; active.clear(); anim.clear();
+    state.chars = []; state.caret = 0; state.anchor = null; active.clear(); anim.clear();
     const clean = text.replace(/\r/g, '');
     insert(clean, now, null);
     const maxX = state.w - MARGIN, rows = new Set();
@@ -151,6 +152,7 @@ const Brush = (() => {
 
   // Deletes one glyph before (dir<0) or after (dir>0) the caret and reports whether anything changed.
   function remove(dir) {
+    if (deleteSel()) return true;
     const i = dir < 0 ? state.caret - 1 : state.caret;
     if (i < 0 || i >= state.chars.length) return false;
     active.delete(state.chars[i]); anim.delete(state.chars[i]); wetDirty = true;
@@ -170,8 +172,10 @@ const Brush = (() => {
   function rowEnd(r) { return r === state.rows.length - 1 ? state.chars.length : state.rows[r].end - 1; }
 
   // Moves the caret by a column delta or a row delta, clamped to the document.
-  function move(dCol, dRow) {
+  function move(dCol, dRow, ext) {
     const cs = state.chars;
+    if (!dRow && !ext && selRange() && Math.abs(dCol) === 1) { const [a, b] = selRange(); state.caret = dCol < 0 ? a : b; state.anchor = null; relayout(); return; }
+    anchorFor(ext);
     if (dRow) {
       const r = Math.max(0, Math.min(state.rows.length - 1, caretRow() + dRow)), R = state.rows[r];
       let best = state.caret, bestD = Infinity;
@@ -182,6 +186,47 @@ const Brush = (() => {
       state.caret = best;
     } else state.caret = Math.max(0, Math.min(cs.length, state.caret + dCol));
     relayout();
+  }
+
+  // Returns the ordered [from, to) selection range, or null when nothing is selected.
+  function selRange() {
+    if (state.anchor === null || state.anchor === state.caret) return null;
+    return [Math.min(state.anchor, state.caret), Math.max(state.anchor, state.caret)];
+  }
+
+  // Starts or clears the selection before a caret move: extending keeps an anchor, a plain move drops it.
+  function anchorFor(ext) { if (!ext) state.anchor = null; else if (state.anchor === null) state.anchor = state.caret; }
+
+  // Deletes the selected text, leaving the caret where it began; reports whether anything was deleted.
+  function deleteSel() {
+    const r = selRange();
+    state.anchor = null;
+    if (!r) return false;
+    for (const c of state.chars.slice(r[0], r[1])) { active.delete(c); anim.delete(c); }
+    state.chars.splice(r[0], r[1] - r[0]); state.caret = r[0];
+    wetDirty = true; restyle(); relayout();
+    return true;
+  }
+
+  // Returns the selected text, or an empty string.
+  function selectedText() { const r = selRange(); return r ? text().slice(r[0], r[1]) : ''; }
+
+  // Selects the whole document.
+  function selectAll() { state.anchor = 0; state.caret = state.chars.length; relayout(false); }
+
+  // Selects the markdown section around the caret: from its heading to just before the next heading of the same or higher rank.
+  function selectSection() {
+    const lines = state.lines, k = state.caret;
+    let li = lines.findIndex(L => k >= L.start && k <= L.end), h = -1;
+    for (let i = li; i >= 0; i--) if (lines[i].kind === 'h') { h = i; break; }
+    if (h < 0) { h = lines.findIndex(L => L.kind === 'h'); state.anchor = 0; li = h; }
+    else state.anchor = lines[h].start;
+    const rank = h >= 0 ? lines[h].hl : 0;
+    let end = state.chars.length;
+    for (let i = Math.max(h + 1, 0); i < lines.length; i++) if (lines[i].kind === 'h' && lines[i].hl <= rank) { end = lines[i].start; break; }
+    if (h < 0) end = state.chars.length;
+    while (end > state.anchor && state.chars[end - 1].c === '\n') end--;
+    state.caret = end; relayout(false);
   }
 
   // Builds the pen path for every distinct glyph in a plain string so no frame pays that cost mid-animation.
@@ -219,7 +264,10 @@ const Brush = (() => {
   }
 
   // Puts the caret at a window-space point.
-  function placeCaret(px, py) { state.caret = indexAt(px, py); relayout(); }
+  function placeCaret(px, py) { state.caret = state.anchor = indexAt(px, py); relayout(); }
+
+  // Extends the selection to a window-space point while the mouse is dragged.
+  function dragTo(px, py) { state.caret = indexAt(px, py); relayout(false); }
 
   // Returns the caret index one word away: backward lands on the word start, forward on the next word start.
   function wordTarget(dir) {
@@ -231,10 +279,11 @@ const Brush = (() => {
   }
 
   // Moves the caret by one word.
-  function moveWord(dir) { state.caret = wordTarget(dir); relayout(); }
+  function moveWord(dir, ext) { anchorFor(ext); state.caret = wordTarget(dir); relayout(); }
 
   // Deletes from the caret to the neighbouring word boundary.
   function removeWord(dir) {
+    if (deleteSel()) return true;
     const t = wordTarget(dir), a = Math.min(t, state.caret), n = Math.abs(t - state.caret);
     if (!n) return false;
     for (const c of state.chars.slice(a, a + n)) { active.delete(c); anim.delete(c); }
@@ -244,7 +293,8 @@ const Brush = (() => {
   }
 
   // Jumps the caret to the start or end of its row (dir<0 start, dir>0 end) or of the whole document when whole is set.
-  function jump(dir, whole) {
+  function jump(dir, whole, ext) {
+    anchorFor(ext);
     if (whole) state.caret = dir < 0 ? 0 : state.chars.length;
     else { const r = caretRow(); state.caret = dir < 0 ? state.rows[r].start : rowEnd(r); }
     relayout();
@@ -364,6 +414,16 @@ const Brush = (() => {
   // Draws the block decorations behind settled ink: code washes, quote bars, bullets and horizontal rules.
   function decorate(g, rgb) {
     const top = state.scroll - LINE * 2, bot = state.scroll + state.h + LINE * 2, cs = state.chars, maxX = state.w - MARGIN;
+    const sel = selRange();
+    if (sel) {
+      g.fillStyle = Paper.css(rgb, 0.17);
+      for (const R of state.rows) {
+        const a = Math.max(R.start, sel[0]), b = Math.min(R.end, sel[1]);
+        if (R.y < top || R.y > bot || a > b || (a === b && !(sel[0] <= R.start && sel[1] >= R.end))) continue;
+        const x0 = a >= state.chars.length ? R.x1 : state.car[3 * a], x1 = b >= R.end ? R.x1 + (sel[1] >= R.end && R.end > R.start && cs[R.end - 1].c === '\n' ? 10 : 0) : state.car[3 * b];
+        g.beginPath(); g.roundRect(x0 - 2, R.top + R.h * 0.1, Math.max(6, x1 - x0 + 4), R.h * 0.86, 6); g.fill();
+      }
+    }
     for (const R of state.rows) {
       if (R.y < top || R.y > bot) continue;
       const L = R.line;
@@ -506,5 +566,5 @@ const Brush = (() => {
     if (state.ptr) { springPointer(dt); drawPointer(ctx, rgb); }
   }
 
-  return { pointer, pointerOff, scrollBy, placeCaret, moveWord, removeWord, jump, warm, resize, relayout, insert, load, remove, move, text, frame, invalidate, state, SIZE };
+  return { pointer, pointerOff, scrollBy, placeCaret, dragTo, selectAll, selectSection, selectedText, deleteSel, moveWord, removeWord, jump, warm, resize, relayout, insert, load, remove, move, text, frame, invalidate, state, SIZE };
 })();
